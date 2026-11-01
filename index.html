@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Link4m Bypass v3</title>
+<style>
+  :root { --bg:#0b0d10; --panel:#14181d; --line:#232a31; --txt:#e6edf3; --dim:#8b98a5; --acc:#3fb950; --warn:#d29922; --err:#f85149; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--txt); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; display:flex; align-items:center; justify-content:center; padding:20px; }
+  .wrap { width:100%; max-width:760px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .sub { color:var(--dim); font-size:12px; margin-bottom:18px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  label { display:block; font-size:12px; color:var(--dim); margin-bottom:6px; }
+  textarea { width:100%; min-height:96px; resize:vertical; background:#0f1216; color:var(--txt); border:1px solid var(--line); border-radius:8px; padding:10px 12px; font:inherit; font-size:13px; outline:none; }
+  textarea:focus { border-color:var(--acc); }
+  .row { display:flex; gap:10px; margin-top:12px; flex-wrap:wrap; }
+  button { flex:1; min-width:130px; cursor:pointer; font:inherit; font-size:13px; font-weight:600; border-radius:8px; padding:11px 16px; border:1px solid var(--line); background:#1c2229; color:var(--txt); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.primary { background:var(--acc); color:#04140a; border-color:var(--acc); }
+  .status { margin-top:14px; font-size:12px; min-height:18px; color:var(--dim); }
+  .status.ok { color:var(--acc); } .status.err { color:var(--err); } .status.warn { color:var(--warn); }
+  .out { margin-top:12px; }
+  .out-item { background:#0f1216; border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:8px; font-size:12px; word-break:break-all; display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  .out-item a { color:var(--acc); text-decoration:none; }
+  .copy { flex-shrink:0; background:#1c2229; border:1px solid var(--line); border-radius:6px; padding:6px 10px; font-size:11px; cursor:pointer; color:var(--dim); }
+  .badge { display:inline-block; font-size:10px; padding:2px 7px; border-radius:20px; background:#1c2229; border:1px solid var(--line); color:var(--dim); margin-left:6px; }
+  .hint { font-size:11px; color:var(--dim); margin-top:8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Link4m Bypass v3</h1>
+  <div class="sub">Dán link link4 — nhận link đích. Nếu fail, thử lại 2-3 lần (tool đổi proxy mỗi lần).</div>
+  <div class="panel">
+    <label for="inp">Link đầu vào (mỗi dòng một link)</label>
+    <textarea id="inp" placeholder="https://link4m.com/xxxxx" spellcheck="false"></textarea>
+    <div class="row">
+      <button class="primary" id="go">Bypass</button>
+      <button id="paste">Dán</button>
+      <button id="clear">Xóa</button>
+    </div>
+    <div class="status" id="status"></div>
+    <div class="hint" id="hint"></div>
+    <div class="out" id="out"></div>
+  </div>
+</div>
+<script>
+(() => {
+  'use strict';
+  const PROXIES = [
+    u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+    u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+    u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+    u => `https://thingproxy.freeboard.io/fetch/${u}`,
+    u => `https://cors.eu.org/${u}`,
+    u => `https://proxy.cors.sh/${u}`
+  ];
+  const $ = id => document.getElementById(id);
+  const out = $('out'), statusEl = $('status'), hintEl = $('hint');
+  let busy = false;
+  const setStatus = (m, c = '') => { statusEl.textContent = m; statusEl.className = 'status ' + c; };
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  const isLink4 = u => /link4/i.test(u) || /^https?:\/\/(link4m|link4)/i.test(u);
+
+  const normalizeInput = raw => {
+    let s = raw.trim();
+    if (!s) return null;
+    if (!/^https?:\/\//i.test(s)) {
+      if (/link4/i.test(s) || /^www\./i.test(s)) s = 'https://' + s;
+      else return null;
+    }
+    try { const u = new URL(s); return /^https?:$/.test(u.protocol) ? u.href : null; }
+    catch { return null; }
+  };
+
+  const decodeHtml = s => s.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&#x2F;/g,'/').replace(/\\\//g,'/');
+  const escapeHtml = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  const fetchVia = async (proxyFn, url) => {
+    const res = await fetch(proxyFn(url), { method:'GET', headers:{ 'Accept':'text/html,application/json' } });
+    if (!res.ok) throw new Error('status ' + res.status);
+    const t = await res.text();
+    if (!t || t.length < 150) throw new Error('empty');
+    return t;
+  };
+
+  const fetchAll = async (url) => {
+    const errs = [];
+    for (const p of PROXIES) {
+      try { return await fetchVia(p, url); }
+      catch (e) { errs.push(e.message); }
+    }
+    throw new Error('all proxies failed: ' + errs.join('|'));
+  };
+
+  // Bóc link từ HTML + JSON
+  const extractTarget = (html) => {
+    const cands = [];
+    let m;
+    const push = (v, src) => {
+      if (!v) return;
+      v = decodeHtml(String(v).trim());
+      if (!/^https?:\/\//i.test(v)) return;
+      if (/link4/i.test(v)) return;
+      if (v.length < 12) return;
+      cands.push({ v, src });
+    };
+
+    // 1. JSON keys phổ biến
+    const jsonKeys = ['url','link','target','dest','destination','redirect','long_url','longUrl','real_url','realUrl','final_url','finalUrl','original_url','originalUrl','href','location'];
+    for (const k of jsonKeys) {
+      const re = new RegExp(`"${k}"\\s*:\\s*"([^"]+)"`, 'gi');
+      while ((m = re.exec(html))) push(m[1], 'json:' + k);
+    }
+
+    // 2. data-*
+    const attrRe = /data-(?:url|link|href|redirect|target|dest|destination|real|final)\s*=\s*["']([^"']+)["']/gi;
+    while ((m = attrRe.exec(html))) push(m[1], 'data');
+
+    // 3. meta refresh
+    const metaRe = /<meta[^>]+http-equiv\s*=\s*["']?refresh["']?[^>]*content\s*=\s*["'][^"']*url\s*=\s*([^"'>\s]+)/gi;
+    while ((m = metaRe.exec(html))) push(m[1].replace(/^['"]|['"]$/g,''), 'meta');
+
+    // 4. location
+    const locRe = /(?:window\.)?location(?:\.href)?\s*(?:=|\.replace\(|\.assign\()\s*["']([^"']+)["']/gi;
+    while ((m = locRe.exec(html))) push(m[1], 'location');
+
+    // 5. form action
+    const formRe = /<form[^>]+action\s*=\s*["']([^"']+)["']/gi;
+    while ((m = formRe.exec(html))) push(m[1], 'form');
+
+    // 6. redirect in JS var
+    const jsRe = /(?:var|let|const)\s+\w*(?:url|link|target|dest|redirect)\w*\s*=\s*["']([^"']+)["']/gi;
+    while ((m = jsRe.exec(html))) push(m[1], 'jsvar');
+
+    // 7. base64
+    const b64Re = /["']([A-Za-z0-9+/=]{20,})["']/g;
+    while ((m = b64Re.exec(html))) { try { push(atob(m[1]), 'b64'); } catch {} }
+
+    // 8. any href không phải link4 / CDN
+    const aRe = /<a[^>]+href\s*=\s*["']([^"']+)["']/gi;
+    while ((m = aRe.exec(html))) {
+      let v = decodeHtml(m[1]); if (v.startsWith('//')) v = 'https:' + v;
+      if (!/^https?:\/\//i.test(v) || /link4/i.test(v)) continue;
+      let host = ''; try { host = new URL(v).hostname; } catch { continue; }
+      if (/^(cdn|static|assets|fonts|www|api|go|track|analytics|google|gstatic|facebook|cloudflare|jsdelivr|unpkg|doubleclick|adservice|pagead)/i.test(host)) continue;
+      push(v, 'anchor');
+    }
+
+    if (!cands.length) return null;
+
+    // Ưu tiên theo độ "chắc"
+    const order = ['json:url','json:long_url','json:real_url','json:final_url','json:destination','json:target','json:link','json:redirect','json:href','json:original_url','data','meta','location','form','jsvar','b64','anchor'];
+    const rank = c => { const i = order.indexOf(c.src); return i === -1 ? 99 : i; };
+    cands.sort((a,b) => rank(a) - rank(b));
+
+    // Dedup
+    const seen = new Set();
+    for (const c of cands) { if (seen.has(c.v)) continue; seen.add(c.v); }
+    return cands[0];
+  };
+
+  const render = (url, target, src) => {
+    const d = document.createElement('div'); d.className = 'out-item';
+    const l = document.createElement('div'); l.style.minWidth = '0';
+    l.innerHTML = target
+      ? `<div style="color:var(--dim);font-size:10px;margin-bottom:4px">${escapeHtml(url)}</div><a href="${escapeHtml(target)}" target="_blank" rel="noopener">${escapeHtml(target)}</a><span class="badge">${escapeHtml(src)}</span>`
+      : `<div style="color:var(--dim);font-size:10px;margin-bottom:4px">${escapeHtml(url)}</div><span style="color:var(--err)">không bóc được — bấm Bypass lại, hoặc link này bị Cloudflare chặn proxy</span>`;
+    const b = document.createElement('button'); b.className = 'copy'; b.textContent = 'Copy';
+    b.onclick = async () => { if (!target) return; try { await navigator.clipboard.writeText(target); b.textContent = 'Đã copy'; } catch { b.textContent = 'Lỗi'; } setTimeout(() => b.textContent = 'Copy', 1400); };
+    d.appendChild(l); d.appendChild(b); out.appendChild(d);
+  };
+
+  const run = async () => {
+    if (busy) return;
+    out.innerHTML = ''; hintEl.textContent = '';
+    const lines = $('inp').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    if (!lines.length) return setStatus('Chưa có link.', 'warn');
+
+    const urls = [], skipped = [];
+    for (const l of lines) {
+      const v = normalizeInput(l);
+      if (!v) { skipped.push(l + ' (sai)'); continue; }
+      if (!isLink4(v)) { skipped.push(l + ' (không phải link4)'); continue; }
+      urls.push(v);
+    }
+    if (skipped.length) hintEl.textContent = 'Bỏ qua: ' + skipped.slice(0,3).join(' · ');
+    if (!urls.length) return setStatus('Không có link4 hợp lệ.', 'err');
+
+    busy = true; $('go').disabled = true;
+    let ok = 0, fail = 0;
+    for (let i = 0; i < urls.length; i++) {
+      setStatus(`Đang xử lý ${i+1}/${urls.length}…`);
+      try {
+        const html = await fetchAll(urls[i]);
+        const f = extractTarget(html);
+        if (f) { ok++; render(urls[i], f.v, f.src); }
+        else { fail++; render(urls[i], null); }
+        setStatus(`Xong ${i+1}/${urls.length} — OK ${ok} · Fail ${fail}`, 'ok');
+      } catch (e) { fail++; render(urls[i], null); setStatus(`Lỗi ${i+1}/${urls.length}: proxy chết`, 'err'); }
+      if (i < urls.length - 1) await sleep(700);
+    }
+    setStatus(`Hoàn tất — OK ${ok} · Fail ${fail}`, ok ? 'ok' : 'err');
+    busy = false; $('go').disabled = false;
+  };
+  $('go').onclick = run;
+  $('clear').onclick = () => { $('inp').value = ''; out.innerHTML = ''; setStatus(''); hintEl.textContent = ''; };
+  $('paste').onclick = async () => { try { const t = await navigator.clipboard.readText(); $('inp').value = ($('inp').value ? $('inp').value + '\n' : '') + t; setStatus('Đã dán.', 'ok'); } catch { setStatus('Clipboard chặn — dán tay.', 'warn'); } };
+})();
+</script>
+</body>
+</html>
